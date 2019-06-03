@@ -17,8 +17,8 @@
 #include "templ-payloads.h"
 #include "syn-cookie.h"
 #include "unusedparm.h"
-#include "script.h"
-
+#include "vulncheck.h"
+#include "util-malloc.h"
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
@@ -350,7 +350,7 @@ struct TemplateSet templ_copy(const struct TemplateSet *templset)
     for (i=0; i<templset->count; i++) {
         const struct TemplatePacket *p1 = &templset->pkts[i];
         struct TemplatePacket *p2 = &result.pkts[i];
-        p2->packet = (unsigned char*)malloc(p2->length);
+        p2->packet = MALLOC(p2->length);
         memcpy(p2->packet, p1->packet, p2->length);
     }
 
@@ -515,7 +515,7 @@ udp_payload_fixup(struct TemplatePacket *tmpl, unsigned port, unsigned seqno)
 
     UNUSEDPARM(seqno);
 
-    payloads_lookup(tmpl->payloads,
+    payloads_udp_lookup(tmpl->payloads,
                     port,
                     &px2,
                     &length2,
@@ -595,8 +595,8 @@ template_set_target(
         px[26] = (unsigned char)((ip_them >>  8) & 0xFF);
         px[27] = (unsigned char)((ip_them >>  0) & 0xFF);
         return;
-    } else if (port_them == Templ_Script) {
-        tmpl = &tmplset->pkts[Proto_Script];
+    } else if (port_them == Templ_VulnCheck) {
+        tmpl = &tmplset->pkts[Proto_VulnCheck];
         port_them &= 0xFFFF;
     } else {
         return;
@@ -748,8 +748,8 @@ template_set_target(
             px[offset_tcp+2] = (unsigned char)(xsum >>  8);
             px[offset_tcp+3] = (unsigned char)(xsum >>  0);
         break;
-    case Proto_Script:
-            tmplset->script->set_target(tmpl,
+    case Proto_VulnCheck:
+            tmplset->vulncheck->set_target(tmpl,
                                      ip_them, port_them,
                                      ip_me, port_me,
                                      seqno,
@@ -757,6 +757,9 @@ template_set_target(
             break;
     case Proto_ARP:
         /* don't do any checksumming */
+        break;
+    case Proto_Oproto:
+        /* TODO: probably need to add checksums for certain protocols */
         break;
     case Proto_Count:
         break;
@@ -790,9 +793,7 @@ _template_init(
     memset(tmpl, 0, sizeof(*tmpl));
     tmpl->length = (unsigned)packet_size;
 
-    tmpl->packet = (unsigned char *)malloc(2048);
-    if (tmpl->packet == NULL)
-        exit(1);
+    tmpl->packet = MALLOC(2048);
     memcpy(tmpl->packet, packet_bytes, tmpl->length);
     px = tmpl->packet;
 
@@ -916,7 +917,8 @@ template_packet_init(
     struct TemplateSet *templset,
     const unsigned char *source_mac,
     const unsigned char *router_mac,
-    struct NmapPayloads *payloads,
+    struct PayloadsUDP *udp_payloads,
+    struct PayloadsUDP *oproto_payloads,
     int data_link,
     uint64_t entropy)
 {
@@ -937,9 +939,18 @@ template_packet_init(
                    default_udp_template,
                    sizeof(default_udp_template)-1,
                    data_link);
-    templset->pkts[Proto_UDP].payloads = payloads;
+    templset->pkts[Proto_UDP].payloads = udp_payloads;
     templset->count++;
-
+    
+    /* [UDP] */
+    _template_init(&templset->pkts[Proto_Oproto],
+                   source_mac, router_mac,
+                   default_udp_template,
+                   sizeof(default_udp_template)-1,
+                   data_link);
+    templset->pkts[Proto_Oproto].payloads = oproto_payloads;
+    templset->count++;
+    
     /* [SCTP] */
     _template_init(&templset->pkts[Proto_SCTP],
                    source_mac, router_mac,
@@ -972,12 +983,12 @@ template_packet_init(
                     data_link);
     templset->count++;
 
-    /* [Script] */
-    if (templset->script) {
-        _template_init( &templset->pkts[Proto_Script],
+    /* [VulnCheck] */
+    if (templset->vulncheck) {
+        _template_init( &templset->pkts[Proto_VulnCheck],
                        source_mac, router_mac,
-                       templset->script->packet,
-                       templset->script->packet_length,
+                       templset->vulncheck->packet,
+                       templset->vulncheck->packet_length,
                        data_link);
         templset->count++;
     }
@@ -1063,7 +1074,7 @@ template_set_vlan(struct TemplateSet *tmplset, unsigned vlan)
         if (tmpl->length < 14)
             continue;
         
-        px = (unsigned char*)malloc(tmpl->length + 4);
+        px = MALLOC(tmpl->length + 4);
         memcpy(px, tmpl->packet, 12);
         memcpy(px+16, tmpl->packet+12, tmpl->length - 12);
         
@@ -1096,7 +1107,8 @@ template_selftest(void)
             tmplset,
             (const unsigned char*)"\x00\x11\x22\x33\x44\x55",
             (const unsigned char*)"\x66\x55\x44\x33\x22\x11",
-            0,
+            0,  /* UDP payloads = empty */
+            0,  /* Oproto payloads = empty */
             1,  /* Ethernet */
             0   /* no entropy */
             );

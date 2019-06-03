@@ -17,23 +17,27 @@
 #include "logger.h"
 #include "proto-zeroaccess.h"   /* botnet p2p protocol */
 #include "proto-snmp.h"
+#include "proto-memcached.h"
+#include "proto-coap.h"         /* constrained app proto for IoT udp/5683*/
 #include "proto-ntp.h"
 #include "proto-dns.h"
+#include "util-malloc.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
 
-struct Payload {
+struct PayloadUDP_Item {
     unsigned port;
     unsigned source_port; /* not used yet */
     unsigned length;
     unsigned xsum;
+    unsigned rarity;
     SET_COOKIE set_cookie;
     unsigned char buf[1];
 };
-struct Payload2 {
+struct PayloadUDP_Default {
     unsigned port;
     unsigned source_port;
     unsigned length;
@@ -43,36 +47,37 @@ struct Payload2 {
 
 };
 
-struct NmapPayloads {
+struct PayloadsUDP {
     unsigned count;
     size_t max;
-    struct Payload **list;
+    struct PayloadUDP_Item **list;
 };
 
 
-struct Payload2 hard_coded_payloads[] = {
-    {161, 65536, 59, 0, snmp_set_cookie,
-     "\x30" "\x39"
-       "\x02\x01\x00"                    /* version */
-       "\x04\x06" "public"               /* community = public */
-       "\xa0" "\x2c"                     /* type = GET */
-        "\x02\x04\x00\x00\x00\x00"      /* transaction id = ???? */
-        "\x02\x01\x00"                  /* error = 0 */
-        "\x02\x01\x00"                  /* error index = 0 */
-         "\x30\x1e"
-          "\x30\x0d"
-           "\x06\x09\x2b\x06\x01\x80\x02\x01\x01\x01\x00" /*sysName*/
-           "\x05\x00"          /*^^^^_____IDS LULZ HAH HA HAH*/
-         "\x30\x0d"
-           "\x06\x09\x2b\x06\x01\x80\x02\x01\x01\x05\x00" /*sysDesc*/
-           "\x05\x00"},        /*^^^^_____IDS LULZ HAH HA HAH*/
+struct PayloadUDP_Default hard_coded_oproto_payloads[] = {
+    /* ECHO protocol - echoes back whatever we send */
+    {47, 65536, 4, 0, 0, "\0\0\0\0"},
+    {0,0,0,0,0}
+};
+
+
+struct PayloadUDP_Default hard_coded_udp_payloads[] = {
+    /* ECHO protocol - echoes back whatever we send */
+    {7, 65536, 12, 0, 0, "masscan-test 0x00000000"},
+
+    /* QOTD - quote of the day (amplifier) */
+    {17, 65536, 12, 0, 0, "masscan-test"},
+    
+    /* chargen - character generator (amplifier) */
+    {19, 65536, 12, 0, 0, "masscan-test"},
+    
     {53, 65536, 0x1f, 0, dns_set_cookie,
         /* 00 */"\x50\xb6"  /* transaction id */
         /* 02 */"\x01\x20"  /* quer y*/
         /* 04 */"\x00\x01"  /* query = 1 */
         /* 06 */"\x00\x00\x00\x00\x00\x00"
-        /* 0c */"\x07" "version"  "\x04" "bind" "\xc0\x1b"
-        /* 1b */"\x00\x10" /* TXT */            /*^^^^^^^_____IDS LULZ HAH HA HAH*/
+        /* 0c */"\x07" "version"  "\x04" "bind" "\x00"
+        /* 1b */"\x00\x10" /* TXT */           
         /* 1d */"\x00\x03" /* CHAOS */
         /* 1f */
     },
@@ -91,6 +96,31 @@ struct Payload2 hard_coded_payloads[] = {
         "\x00\x21" /* type = nbt */
         "\x00\x01" /* class = iternet*/
     },
+    {161, 65536, 59, 0, snmp_set_cookie,
+     "\x30" "\x39"
+       "\x02\x01\x00"                    /* version */
+       "\x04\x06" "public"               /* community = public */
+       "\xa0" "\x2c"                     /* type = GET */
+        "\x02\x04\x00\x00\x00\x00"      /* transaction id = ???? */
+        "\x02\x01\x00"                  /* error = 0 */
+        "\x02\x01\x00"                  /* error index = 0 */
+         "\x30\x1e"
+          "\x30\x0d"
+           "\x06\x09\x2b\x06\x01\x80\x02\x01\x01\x01\x00" /*sysName*/
+           "\x05\x00"          /*^^^^_____IDS LULZ HAH HA HAH*/
+         "\x30\x0d"
+           "\x06\x09\x2b\x06\x01\x80\x02\x01\x01\x05\x00" /*sysDesc*/
+           "\x05\x00"},        /*^^^^_____IDS LULZ HAH HA HAH*/
+
+    /* UPnP SSDP - Univeral Plug-n-Play Simple Service Discovery Protocol */
+    {1900, 65536, 0xFFFFFFFF, 0, 0,
+            "M-SEARCH * HTTP/1.1\r\n"
+            "HOST: 239.255.255.250:1900\r\n"
+            "MAN: \"ssdp:discover\"\r\n"
+            "MX: 1\r\n"
+            "ST: ssdp:all\r\n"
+            "USER-AGENT: unix/1.0 UPnP/1.1 masscan/1.x\r\n"},
+
     {5060, 65536, 0xFFFFFFFF, 0, 0,
         "OPTIONS sip:carol@chicago.com SIP/2.0\r\n"
         "Via: SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bKhjhs8ass877\r\n"
@@ -103,6 +133,24 @@ struct Payload2 hard_coded_payloads[] = {
         "Accept: application/sdp\r\n"
         "Content-Length: 0\r\n"
     },
+    
+    /* CoAP (contrained app proto for IoT) GET /.well-known/core request */
+    {5683, 65536, 21, 0, coap_udp_set_cookie,
+        "\x40"      /* ver=1 type=con */
+        "\x01"      /* code=GET */
+        "\x01\xce"  /* message id (changed by set-cookie) */
+        "\xbb" /* ".well-known */
+            "\x2e\x77\x65\x6c\x6c\x2d\x6b\x6e\x6f\x77\x6e"
+        "\x04" /* "core" */
+            "\x63\x6f\x72\x65"
+
+    },
+
+    /* memcached "stats" request. This looks for memcached systems that can
+     * be used for DDoS amplifiers */
+    {11211, 65536, 15, 0, memcached_udp_set_cookie,
+        "\x00\x00\x00\x00\x00\x01\x00\x00stats\r\n"
+    },
 
     //16464,16465,16470, 16471
     {16464, 65536, zeroaccess_getL_length, 0, 0,
@@ -113,6 +161,13 @@ struct Payload2 hard_coded_payloads[] = {
         (char *)zeroaccess_getL},
     {16471, 65536, zeroaccess_getL_length, 0, 0,
         (char *)zeroaccess_getL},
+
+    /* Quake 3 (amplifier)
+     * http://blog.alejandronolla.com/2013/06/24/amplification-ddos-attack-with-quake3-servers-an-analysis-1-slash-2/
+     */
+    {27960, 65536, 0xFFFFFFFF, 0, 0,
+        "\xFF\xFF\xFF\xFF\x67\x65\x74\x73\x74\x61\x74\x75\x73\x10"},
+
 
     {0,0,0,0,0}
 };
@@ -145,8 +200,8 @@ partial_checksum(const unsigned char *px, size_t icmp_length)
  * If we have the port, return the payload
  ***************************************************************************/
 int
-payloads_lookup(
-        const struct NmapPayloads *payloads,
+payloads_udp_lookup(
+        const struct PayloadsUDP *payloads,
         unsigned port,
         const unsigned char **px,
         unsigned *length,
@@ -177,7 +232,7 @@ payloads_lookup(
 /***************************************************************************
  ***************************************************************************/
 void
-payloads_destroy(struct NmapPayloads *payloads)
+payloads_udp_destroy(struct PayloadsUDP *payloads)
 {
     unsigned i;
     if (payloads == NULL)
@@ -199,19 +254,14 @@ payloads_destroy(struct NmapPayloads *payloads)
  * faster, ideally looking up only zero or one rather than twenty.
  ***************************************************************************/
 void
-payloads_trim(struct NmapPayloads *payloads, const struct RangeList *target_ports)
+payloads_udp_trim(struct PayloadsUDP *payloads, const struct RangeList *target_ports)
 {
     unsigned i;
-    struct Payload **list2;
+    struct PayloadUDP_Item **list2;
     unsigned count2 = 0;
 
     /* Create a new list */
-    if (payloads->max >= SIZE_MAX/sizeof(list2[0]))
-        exit(1); /* integer overflow */
-    else
-    list2 = (struct Payload **)malloc(payloads->max * sizeof(list2[0]));
-    if (list2 == NULL)
-        exit(1); /* out of memory */
+    list2 = REALLOCARRAY(0, payloads->max, sizeof(list2[0]));
 
     /* Add to the new list any used ports */
     for (i=0; i<payloads->count; i++) {
@@ -227,6 +277,35 @@ payloads_trim(struct NmapPayloads *payloads, const struct RangeList *target_port
         //payloads->list[i] = 0;
     }
 
+    /* Replace the old list */
+    free(payloads->list);
+    payloads->list = list2;
+    payloads->count = count2;
+}
+
+void
+payloads_oproto_trim(struct PayloadsUDP *payloads, const struct RangeList *target_ports)
+{
+    unsigned i;
+    struct PayloadUDP_Item **list2;
+    unsigned count2 = 0;
+    
+    /* Create a new list */
+    list2 = REALLOCARRAY(0, payloads->max, sizeof(list2[0]));
+    
+    /* Add to the new list any used ports */
+    for (i=0; i<payloads->count; i++) {
+        unsigned found;
+        
+        found = rangelist_is_contains(  target_ports,
+                                      payloads->list[i]->port + Templ_Oproto_first);
+        if (found) {
+            list2[count2++] = payloads->list[i];
+        } else {
+            free(payloads->list[i]);
+        }
+    }
+    
     /* Replace the old list */
     free(payloads->list);
     payloads->list = list2;
@@ -409,15 +488,17 @@ get_next_line(FILE *fp, unsigned *line_number, char *line, size_t sizeof_line)
 
 
 /***************************************************************************
+ * Adds a payloads template for the indicated datagram protocol, which
+ * is UDP or Oproto ("other IP protocol").
  ***************************************************************************/
 static unsigned
-payload_add(struct NmapPayloads *payloads,
+payloads_datagram_add(struct PayloadsUDP *payloads,
             const unsigned char *buf, size_t length,
             struct RangeList *ports, unsigned source_port,
             SET_COOKIE set_cookie)
 {
     unsigned count = 1;
-    struct Payload *p;
+    struct PayloadUDP_Item *p;
     uint64_t port_count = rangelist_count(ports);
     uint64_t i;
 
@@ -425,25 +506,12 @@ payload_add(struct NmapPayloads *payloads,
         /* grow the list if we need to */
         if (payloads->count + 1 > payloads->max) {
             size_t new_max = payloads->max*2 + 1;
-            struct Payload **new_list;
-
-            if (new_max >= SIZE_MAX/sizeof(new_list[0]))
-                exit(1); /* integer overflow */
-            new_list = (struct Payload**)malloc(new_max * sizeof(new_list[0]));
-            if (new_list == NULL)
-                exit(1); /* out of memory */
-
-            memcpy(new_list, payloads->list, payloads->count * sizeof(new_list[0]));
-            free(payloads->list);
-            payloads->list = new_list;
+            payloads->list = REALLOCARRAY(payloads->list, new_max, sizeof(payloads->list[0]));
             payloads->max = new_max;
         }
 
         /* allocate space for this record */
-        p = (struct Payload *)malloc(sizeof(p[0]) + length);
-        if (p == NULL)
-            exit(1); /* out of memory */
-
+        p = MALLOC(sizeof(p[0]) + length);
         p->port = rangelist_pick(ports, i);
         p->source_port = source_port;
         p->length = (unsigned)length;
@@ -485,7 +553,8 @@ payload_add(struct NmapPayloads *payloads,
  ***************************************************************************/
 void
 payloads_read_pcap(const char *filename,
-                   struct NmapPayloads *payloads)
+                   struct PayloadsUDP *payloads,
+                   struct PayloadsUDP *oproto_payloads)
 {
     struct PcapFile *pcap;
     unsigned count = 0;
@@ -509,8 +578,8 @@ payloads_read_pcap(const char *filename,
         unsigned captured_length;
         unsigned char buf[65536];
         struct PreprocessedInfo parsed;
-        struct RangeList ports[1];
-        struct Range range[1];
+        struct RangeList ports[1] = {{0}};
+        struct Range range[1] = {{0}};
 
         /*
          * Read the next packet from the capture file
@@ -541,30 +610,51 @@ payloads_read_pcap(const char *filename,
         switch (parsed.found) {
         case FOUND_DNS:
         case FOUND_UDP:
+                /*
+                 * Kludge: mark the port in the format the API wants
+                 */
+                ports->list = range;
+                ports->count = 1;
+                ports->max = 1;
+                range->begin = parsed.port_dst;
+                range->end = range->begin;
+                
+                /*
+                 * Now we've completely parsed the record, so add it to our
+                 * list of payloads
+                 */
+                count += payloads_datagram_add(   payloads,
+                                          buf + parsed.app_offset,
+                                          parsed.app_length,
+                                          ports,
+                                          0x10000,
+                                          0);
+            break;
+        case FOUND_OPROTO:
+                /*
+                 * Kludge: mark the port in the format the API wants
+                 */
+                ports->list = range;
+                ports->count = 1;
+                ports->max = 1;
+                range->begin = parsed.ip_protocol;
+                range->end = range->begin;
+                
+                /*
+                 * Now we've completely parsed the record, so add it to our
+                 * list of payloads
+                 */
+                count += payloads_datagram_add(oproto_payloads,
+                                          buf + parsed.transport_offset,
+                                          parsed.transport_length,
+                                          ports,
+                                          0x10000,
+                                          0);
             break;
         default:
             continue;
         }
 
-        /*
-         * Kludge: mark the port in the format the API wants
-         */
-        ports->list = range;
-        ports->count = 1;
-        ports->max = 1;
-        range->begin = parsed.port_dst;
-        range->end = range->begin;
-
-        /*
-         * Now we've completely parsed the record, so add it to our
-         * list of payloads
-         */
-        count += payload_add(   payloads,
-                                buf + parsed.app_offset,
-                                parsed.app_length,
-                                ports,
-                                0x10000,
-                                0);
     }
 
     LOG(2, "payloads:'%s': imported %u unique payloads\n", filename, count);
@@ -576,8 +666,8 @@ payloads_read_pcap(const char *filename,
  * Called during processing of the "--nmap-payloads <filename>" directive.
  ***************************************************************************/
 void
-payloads_read_file(FILE *fp, const char *filename,
-                   struct NmapPayloads *payloads)
+payloads_udp_readfile(FILE *fp, const char *filename,
+                   struct PayloadsUDP *payloads)
 {
     char line[16384];
     unsigned line_number = 0;
@@ -588,9 +678,9 @@ payloads_read_file(FILE *fp, const char *filename,
     for (;;) {
         unsigned is_error = 0;
         const char *p;
-        struct RangeList ports[1];
+        struct RangeList ports[1] = {{0}};
         unsigned source_port = 0x10000;
-        unsigned char buf[1500];
+        unsigned char buf[1500] = {0};
         size_t buf_length = 0;
 
         memset(ports, 0, sizeof(ports[0]));
@@ -611,7 +701,7 @@ payloads_read_file(FILE *fp, const char *filename,
         /* [ports] */
         if (!get_next_line(fp, &line_number, line, sizeof(line)))
             break;
-        p = rangelist_parse_ports(ports, line, &is_error);
+        p = rangelist_parse_ports(ports, line, &is_error, 0);
         if (is_error) {
             fprintf(stderr, "%s:%u: syntax error, expected ports\n",
                 filename, line_number);
@@ -642,7 +732,7 @@ payloads_read_file(FILE *fp, const char *filename,
                         filename, line_number);
                 goto end;
             }
-            source_port = strtoul(line, 0, 0);
+            source_port = (unsigned)strtoul(line, 0, 0);
             line[0] = '\0';
         }
 
@@ -650,35 +740,11 @@ payloads_read_file(FILE *fp, const char *filename,
          * Now we've completely parsed the record, so add it to our
          * list of payloads
          */
-        payload_add(payloads, buf, buf_length, ports, source_port, 0);
+		if (buf_length)
+			payloads_datagram_add(payloads, buf, buf_length, ports, source_port, 0);
 
         rangelist_remove_all(ports);
     }
-
-#if 0
-    /* */
-    {
-        unsigned i;
-
-        for (i=0; i<payloads->count; i++) {
-            struct Payload *p = payloads->list[i];
-            unsigned j;
-
-            printf("udp %u\n", p->port);
-            printf(" \"");
-            for (j=0; j<p->length; j++) {
-                if (isprint(p->buf[j]))
-                    printf("%c", p->buf[j]);
-                else
-                    printf("\\x%02x", p->buf[j]);
-            }
-            printf("\"\n");
-            if (p->source_port < 65536)
-                printf("source %u\n", p->source_port);
-            printf("\n");
-        }
-    }
-#endif
 
 end:
     ;//fclose(fp);
@@ -686,39 +752,85 @@ end:
 
 /***************************************************************************
  ***************************************************************************/
-struct NmapPayloads *
-payloads_create(void)
+struct PayloadsUDP *
+payloads_udp_create(void)
 {
     unsigned i;
-    struct NmapPayloads *payloads;
-    payloads = (struct NmapPayloads *)malloc(sizeof(*payloads));
-    if (payloads == NULL)
-        exit(1);
-    memset(payloads, 0, sizeof(*payloads));
-
-    for (i=0; hard_coded_payloads[i].length; i++) {
-        struct Range range;
-        struct RangeList list;
+    struct PayloadsUDP *payloads;
+    struct PayloadUDP_Default *hard_coded = hard_coded_udp_payloads;
+    
+    payloads = CALLOC(1, sizeof(*payloads));
+    
+    /*
+     * For popular parts, include some hard-coded default UDP payloads
+     */
+    for (i=0; hard_coded[i].length; i++) {
+        //struct Range range;
+        struct RangeList list = {0};
         unsigned length;
 
         /* Kludge: create a pseudo-rangelist to hold the one port */
-        list.list = &range;
+        /*list.list = &range;
         list.count = 1;
-        range.begin = hard_coded_payloads[i].port;
-        range.end = range.begin;
+        range.begin = hard_coded[i].port;
+        range.end = range.begin;*/
+        rangelist_add_range(&list, hard_coded[i].port, hard_coded[i].port);
 
-        length = hard_coded_payloads[i].length;
+        length = hard_coded[i].length;
         if (length == 0xFFFFFFFF)
-            length = (unsigned)strlen(hard_coded_payloads[i].buf);
+            length = (unsigned)strlen(hard_coded[i].buf);
 
         /* Add this to our real payloads. This will get overwritten
          * if the user adds their own with the same port */
-        payload_add(payloads,
-                    (const unsigned char*)hard_coded_payloads[i].buf,
+        payloads_datagram_add(payloads,
+                    (const unsigned char*)hard_coded[i].buf,
                     length,
                     &list,
-                    hard_coded_payloads[i].source_port,
-                    hard_coded_payloads[i].set_cookie);
+                    hard_coded[i].source_port,
+                    hard_coded[i].set_cookie);
+
+        rangelist_remove_all(&list);
+    }
+    return payloads;
+}
+
+/***************************************************************************
+ * (same code as for UDP)
+ ***************************************************************************/
+struct PayloadsUDP *
+payloads_oproto_create(void)
+{
+    unsigned i;
+    struct PayloadsUDP *payloads;
+    struct PayloadUDP_Default *hard_coded = hard_coded_oproto_payloads;
+    
+    payloads = CALLOC(1, sizeof(*payloads));
+    
+    /*
+     * Some hard-coded ones, like GRE
+     */
+    for (i=0; hard_coded[i].length; i++) {
+        //struct Range range;
+        struct RangeList list = {0};
+        unsigned length;
+        
+        /* Kludge: create a pseudo-rangelist to hold the one port */
+        rangelist_add_range(&list, hard_coded[i].port, hard_coded[i].port);
+        
+        length = hard_coded[i].length;
+        if (length == 0xFFFFFFFF)
+            length = (unsigned)strlen(hard_coded[i].buf);
+        
+        /* Add this to our real payloads. This will get overwritten
+         * if the user adds their own with the same port */
+        payloads_datagram_add(payloads,
+                         (const unsigned char*)hard_coded[i].buf,
+                         length,
+                         &list,
+                         hard_coded[i].source_port,
+                         hard_coded[i].set_cookie);
+        
+        rangelist_remove_all(&list);
     }
     return payloads;
 }
@@ -727,7 +839,7 @@ payloads_create(void)
 /****************************************************************************
  ****************************************************************************/
 int
-payloads_selftest(void)
+payloads_udp_selftest(void)
 {
     unsigned char buf[1024];
     size_t buf_length;

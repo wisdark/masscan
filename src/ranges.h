@@ -1,6 +1,7 @@
 #ifndef RANGES_H
 #define RANGES_H
 #include <stdint.h>
+#include <stdio.h>
 
 /**
  * A range of either IP addresses or ports
@@ -8,14 +9,21 @@
 struct Range
 {
     unsigned begin;
-    unsigned end; /* inclusive */
+    unsigned end; /* inclusive, so [n..m] includes both 'n' and 'm' */
 };
 
+/**
+ * An array of ranges in sorted order
+ */
 struct RangeList
 {
     struct Range *list;
     unsigned count;
     unsigned max;
+    unsigned *picker;
+    unsigned *picker_hash;
+    unsigned picker_mask;
+    unsigned is_sorted:1;
 };
 
 /**
@@ -32,25 +40,6 @@ struct RangeList
 void
 rangelist_add_range(struct RangeList *task, unsigned begin, unsigned end);
 
-/**
- * Removes the given range from the target list. The input range doesn't
- * have to exist, or can partial overlap with existing ranges.
- * @param task
- *      A list of ranges of either IPv4 addresses or port numbers.
- * @param begin
- *      The first address of the range that'll be removed.
- * @param end
- *      The last address of the range that'll be removed (inclusive).
- */
-void
-rangelist_remove_range(struct RangeList *task, unsigned begin, unsigned end);
-
-/**
- * Same as 'rangelist_remove_range()', except the input is a range
- * structure instead of a start/stop numbers.
- */
-void
-rangelist_remove_range2(struct RangeList *task, struct Range range);
 
 /**
  * Returns 'true' is the indicated port or IP address is in one of the task
@@ -65,6 +54,14 @@ rangelist_remove_range2(struct RangeList *task, struct Range range);
 int
 rangelist_is_contains(const struct RangeList *task, unsigned number);
 
+
+/**
+ * Returns 'true' if the indicate range is valid, which is simple the
+ * fact that 'begin' comes before 'end'. We mark invalid ranges
+ * by putting 'begin' after the 'end'
+ */
+int
+range_is_valid(const struct Range range);
 
 /**
  * Parses IPv4 addresses out of a string. A number of formats are allowed,
@@ -94,10 +91,8 @@ range_parse_ipv4(const char *line, unsigned *inout_offset, unsigned max);
  *      A list, probably read in from --excludefile, of things that we
  *      should not be scanning, that will override anything we otherwise
  *      try to scan.
- * @return
- *      the total number of IP addresses or ports removed.
  */
-uint64_t
+void
 rangelist_exclude(  struct RangeList *targets,
               const struct RangeList *excludes);
 
@@ -137,7 +132,8 @@ rangelist_count(const struct RangeList *targets);
  * @return
  *      an IP address or port corresponding to this index.
  */
-unsigned rangelist_pick(const struct RangeList *targets, uint64_t i);
+unsigned
+rangelist_pick(const struct RangeList *targets, uint64_t i);
 
 
 /**
@@ -161,7 +157,9 @@ unsigned rangelist_pick(const struct RangeList *targets, uint64_t i);
 const char *
 rangelist_parse_ports(  struct RangeList *ports,
                         const char *string,
-                        unsigned *is_error);
+                        unsigned *is_error,
+                        unsigned proto_offset
+                      );
 
 
 /**
@@ -170,35 +168,31 @@ rangelist_parse_ports(  struct RangeList *ports,
 void
 rangelist_remove_all(struct RangeList *list);
 
-
 /**
- * Creates an optimized enumerator for translating indexes into
- * IP addresses/ports. When doing an entire Internet scan, there
- * will be thousands of exclude ranges, meaning that translating
- * an index into an address/port can be slow. Instead of doing
- * a linear search, the 'pick2' does it with a faster binary
- * search.
- * FIXME: this is rather a kludge, I should clean it up, but in practice
- * it works really well.
- */
-unsigned *
-rangelist_pick2_create(struct RangeList *targets);
-
-/**
- * Frees the memory allocated by 'rangelist_pick2_create()'
+ * Merge two range lists
  */
 void
-rangelist_pick2_destroy(unsigned *picker);
+rangelist_merge(struct RangeList *list1, const struct RangeList *list2);
+
 
 /**
- * Enumerate the IP address or port number given an index variable.
- * We are choosing an IP/port from the targets list, but we are using
- * the 'picker' numbers to optimize the enumeration.
+ * Optimizes the target list, so that when we call "rangelist_pick()"
+ * from an index, it runs faster. It currently configures this for 
+ * a binary-search, though in the future some more efficient
+ * algorithm may be chosen.
  */
-unsigned
-rangelist_pick2(const struct RangeList *targets, 
-                uint64_t index,
-                const unsigned *picker);
+void
+rangelist_optimize(struct RangeList *targets);
+
+
+/**
+ * Sorts the list of target. We maintain the list of targets in sorted
+ * order internally even though we scan the targets in random order
+ * externally.
+ */
+void
+rangelist_sort(struct RangeList *targets);
+
 
 /**
  * Does a regression test of this module

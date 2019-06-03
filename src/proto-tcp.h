@@ -8,7 +8,7 @@ struct Adapter;
 struct TCP_Control_Block;
 struct TemplatePacket;
 struct TCP_ConnectionTable;
-
+struct lua_State;
 
 #define TCP_SEQNO(px,i) (px[i+4]<<24|px[i+5]<<16|px[i+6]<<8|px[i+7])
 #define TCP_ACKNO(px,i) (px[i+8]<<24|px[i+9]<<16|px[i+10]<<8|px[i+11])
@@ -28,6 +28,8 @@ tcpcon_set_parameter(struct TCP_ConnectionTable *tcpcon,
                         const char *name,
                         size_t value_length,
                         const void *value);
+
+void scripting_init_tcp(struct TCP_ConnectionTable *tcpcon, struct lua_State *L);
 
 /**
  * Create a TCP connection table (to store TCP control blocks) with
@@ -77,7 +79,6 @@ void
 tcpcon_timeouts(struct TCP_ConnectionTable *tcpcon, unsigned secs, unsigned usecs);
 
 enum TCP_What {
-    TCP_WHAT_NOTHING,
     TCP_WHAT_TIMEOUT,
     TCP_WHAT_SYNACK,
     TCP_WHAT_RST,
@@ -119,10 +120,16 @@ tcpcon_create_tcb(
  */
 void
 tcpcon_send_FIN(
-    struct TCP_ConnectionTable *tcpcon,
-    unsigned ip_me, unsigned ip_them,
-    unsigned port_me, unsigned port_them,
-    uint32_t seqno_them, uint32_t ackno_them);
+                struct TCP_ConnectionTable *tcpcon,
+                unsigned ip_me, unsigned ip_them,
+                unsigned port_me, unsigned port_them,
+                uint32_t seqno_them, uint32_t ackno_them);
+void
+tcpcon_send_RST(
+                struct TCP_ConnectionTable *tcpcon,
+                unsigned ip_me, unsigned ip_them,
+                unsigned port_me, unsigned port_them,
+                uint32_t seqno_them, uint32_t ackno_them);
 
 /**
  * Send a reset packet back, even if we don't have a TCP connection

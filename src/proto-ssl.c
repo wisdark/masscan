@@ -51,6 +51,7 @@
 #include "masscan-app.h"
 #include "siphash24.h"
 #include "string_s.h"
+#include "util-malloc.h"
 #include <string.h>
 #include <ctype.h>
 #include <assert.h>
@@ -372,7 +373,8 @@ parse_server_cert(
         void *banner1_private,
         struct ProtocolState *pstate,
         const unsigned char *px, size_t length,
-        struct BannerOutput *banout)
+        struct BannerOutput *banout,
+        struct InteractiveData *more)
 {
     struct SSL_SERVER_CERT *data = &pstate->sub.ssl.x.server_cert;
     unsigned state = data->state;
@@ -464,7 +466,7 @@ parse_server_cert(
                 state = CLEN0;
                 if (remaining == 0) {
                     if (!banner1->is_heartbleed)
-                        pstate->is_done = 1;
+                        tcp_close(more);
                 }
             }
         }
@@ -571,8 +573,7 @@ parse_handshake(
             static const char heartbleed_request[] = 
                 "\x15\x03\x02\x00\x02\x01\x80"
                 "\x18\x03\x02\x00\x03\x01" "\x40\x00";
-            more->payload = heartbleed_request;
-            more->length = sizeof(heartbleed_request)-1;
+            tcp_transmit(more, heartbleed_request, sizeof(heartbleed_request)-1, 0);
         }
         DROPDOWN(i,length,state);
 
@@ -617,7 +618,8 @@ parse_handshake(
                                       banner1_private,
                                       pstate,
                                       px+i, len,
-                                      banout);
+                                      banout,
+                                      more);
                     break;
             }
 
@@ -1134,7 +1136,7 @@ ssl_add_cipherspec_sslv3(void *templ, unsigned cipher_spec, unsigned is_append)
     size_t offset2;
     
     /* Increase space by 2 for additional cipherspec */
-    px = realloc(templ, ssl_hello_size(templ) + 2);
+    px = REALLOC(templ, ssl_hello_size(templ) + 2);
     
     /* parse the lengths */
     len1 = px[3] << 8 | px[4];
@@ -1234,7 +1236,7 @@ ssl_hello(const void *templ)
     size_t template_size = (px[3]<<8 | px[4]) + 5;
     
     /* allocate memory for that size and copy */
-    px = malloc(template_size);
+    px = MALLOC(template_size);
     memcpy(px, templ, template_size);
     
     /* set the new timestamp and randomize buffer */

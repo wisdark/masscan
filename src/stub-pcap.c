@@ -27,13 +27,17 @@
 */
 #include "logger.h"
 
-#if _MSC_VER==1200
+#if defined(_MSC_VER)
 #pragma warning(disable:4115 4201)
-#include <winerror.h>
+#pragma warning(disable:4100) /* unreferenced formal parameter */
+//#include <winerror.h>
 #endif
-#include "rawsock-pcap.h"
+
+#include "stub-pcap.h"
+
 
 #ifdef WIN32
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
 #include <dlfcn.h>
@@ -45,7 +49,7 @@
 
 #ifndef UNUSEDPARM
 #ifdef __GNUC__
-#define UNUSEDPARM(x) x=(x)
+#define UNUSEDPARM(x)
 #else
 #define UNUSEDPARM(x) x=(x)
 #endif
@@ -78,6 +82,27 @@ static void null_PCAP_CLOSE(void *hPcap)
     UNUSEDPARM(hPcap);
 }
 
+#ifdef STATICPCAP
+static pcap_t *(*null_PCAP_CREATE)(const char *source, char *errbuf);
+static int (*null_PCAP_SET_SNAPLEN)(pcap_t *p, int snaplen);
+static int (*null_PCAP_SET_PROMISC)(pcap_t *p, int promisc);
+static int (*null_PCAP_SET_TIMEOUT)(pcap_t *p, int to_ms);
+static int (*null_PCAP_SET_IMMEDIATE_MODE)(pcap_t *p, int immediate_mode);
+static int (*null_PCAP_SET_BUFFER_SIZE)(pcap_t *p, int buffer_size);
+static int (*null_PCAP_SET_RFMON)(pcap_t *p, int rfmon);
+static int (*null_PCAP_CAN_SET_RFMON)(pcap_t *p);
+static int (*null_PCAP_ACTIVATE)(pcap_t *p);
+#else
+static pcap_t *null_PCAP_CREATE(const char *source, char *errbuf) {return 0;}
+static int null_PCAP_SET_SNAPLEN(pcap_t *p, int snaplen) {return 0;}
+static int null_PCAP_SET_PROMISC(pcap_t *p, int promisc) {return 0;}
+static int null_PCAP_SET_TIMEOUT(pcap_t *p, int to_ms) {return 0;}
+static int null_PCAP_SET_IMMEDIATE_MODE(pcap_t *p, int immediate_mode)  {return 0;}
+static int null_PCAP_SET_BUFFER_SIZE(pcap_t *p, int buffer_size) {return 0;}
+static int null_PCAP_SET_RFMON(pcap_t *p, int rfmon) {return 0;}
+static int null_PCAP_CAN_SET_RFMON(pcap_t *p) {return 0;}
+static int null_PCAP_ACTIVATE(pcap_t *p) {return 0;}
+#endif
 
 static unsigned null_PCAP_DATALINK(void *hPcap)
 {
@@ -181,6 +206,7 @@ struct PcapFunctions PCAP = {
 static void *my_null(int x, ...)
 {
 	UNUSEDPARM(x);
+    printf("%.*s", 0, "a"); /* Remove warnings about no effects */
     return 0;
 }
 static pcap_t *null_PCAP_OPEN_OFFLINE(const char *fname, char *errbuf)
@@ -233,6 +259,14 @@ static void null_PCAP_PERROR(pcap_t *p, char *prefix)
 	fprintf(stderr, "%s\n", prefix);
     perror("pcap");
 }
+static const char*null_PCAP_GETERR(pcap_t *p)
+{
+#ifdef STATICPCAP
+    return pcap_geterr(p);
+#endif
+	UNUSEDPARM(p);
+	return "(unknown)";
+}
 static const char *null_PCAP_DEV_NAME(const pcap_if_t *dev)
 {
     return dev->name;
@@ -246,6 +280,10 @@ static const pcap_if_t *null_PCAP_DEV_NEXT(const pcap_if_t *dev)
     return dev->next;
 }
 
+/*
+ * Some Windows-specific functions to improve speed
+ */
+#if defined(WIN32)
 static pcap_send_queue *null_PCAP_SENDQUEUE_ALLOC(size_t size)
 {
 	UNUSEDPARM(size);
@@ -268,6 +306,8 @@ static int null_PCAP_SENDQUEUE_QUEUE(pcap_send_queue *queue,
 	my_null(4, queue, pkt_header, pkt_data);
 	return 0;
 }
+#endif /*WIN32*/
+
 
 /**
  * Runtime-load the libpcap shared-object or the winpcap DLL. We
@@ -294,6 +334,7 @@ int pcap_init(void)
         switch (GetLastError()) {
             case ERROR_MOD_NOT_FOUND:
                 fprintf(stderr, "%s: not found\n", "Packet.dll");
+                fprintf(stderr, "  HINT: you must install either WinPcap or Npcap\n");
                 return -1;
             default:
                 fprintf(stderr, "%s: couldn't load %d\n", "Packet.dll", (int)GetLastError());
@@ -379,17 +420,32 @@ pl->func_err=0, pl->datalink = null_##PCAP_DATALINK;
     DOLINK(PCAP_SETDIRECTION    , setdirection);
     DOLINK(PCAP_DATALINK_VAL_TO_NAME , datalink_val_to_name);
     DOLINK(PCAP_PERROR          , perror);
+    DOLINK(PCAP_GETERR          , geterr);
 
-    DOLINK(PCAP_DEV_NAME        , dev_name);
-    DOLINK(PCAP_DEV_DESCRIPTION , dev_description);
-    DOLINK(PCAP_DEV_NEXT        , dev_next);
 
+    /* pseudo functions that don't exist in the libpcap interface */
+    pl->dev_name = null_PCAP_DEV_NAME;
+    pl->dev_description = null_PCAP_DEV_DESCRIPTION;
+    pl->dev_next = null_PCAP_DEV_NEXT;
+
+    /* windows-only functions that might improve speed */
+#if defined(WIN32)
 	DOLINK(PCAP_SENDQUEUE_ALLOC		, sendqueue_alloc);
 	DOLINK(PCAP_SENDQUEUE_TRANSMIT	, sendqueue_transmit);
 	DOLINK(PCAP_SENDQUEUE_DESTROY	, sendqueue_destroy);
 	DOLINK(PCAP_SENDQUEUE_QUEUE		, sendqueue_queue);
+#endif
 
-    
+    DOLINK(PCAP_CREATE              , create);
+    DOLINK(PCAP_SET_SNAPLEN         , set_snaplen);
+    DOLINK(PCAP_SET_PROMISC         , set_promisc);
+    DOLINK(PCAP_SET_TIMEOUT         , set_timeout);
+    DOLINK(PCAP_SET_IMMEDIATE_MODE  , set_immediate_mode);
+    DOLINK(PCAP_SET_BUFFER_SIZE     , set_buffer_size);
+    DOLINK(PCAP_SET_RFMON           , set_rfmon);
+    DOLINK(PCAP_CAN_SET_RFMON       , can_set_rfmon);
+    DOLINK(PCAP_ACTIVATE            , activate);
+
     
     if (!pl->func_err)
         pl->is_available = 1;

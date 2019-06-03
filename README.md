@@ -1,21 +1,27 @@
+[![Build Status](https://travis-ci.org/robertdavidgraham/masscan.svg?branch=master)](https://travis-ci.org/robertdavidgraham/masscan.svg)
+
 # MASSCAN: Mass IP port scanner
 
-This is the fastest Internet port scanner. It can scan the entire Internet
-in under 6 minutes, transmitting 10 million packets per second.
+This is an Internet-scale port scanner. It can scan the entire Internet
+in under 6 minutes, transmitting 10 million packets per second,
+from a single machine.
 
-It produces results similar to `nmap`, the most famous port scanner.
-Internally, it operates more like `scanrand`, `unicornscan`, and `ZMap`, using
-asynchronous transmission. The major difference is that it's faster than these
-other scanners. In addition, it's more flexible, allowing arbitrary address
-ranges and port ranges.
+It's input/output is similar to `nmap`, the most famous port scanner.
+When in doubt, try one of those features.
 
-NOTE: masscan uses a **custom TCP/IP stack**. Anything other than simple port
-scans will cause conflict with the local TCP/IP stack. This means you need to
-either use the `-S` option to use a separate IP address, or configure your
-operating system to firewall the ports that masscan uses.
+Internally, it uses asynchronous tranmissions, similar to port scanners
+like  `scanrand`, `unicornscan`, and `ZMap`. It's more flexible, allowing
+arbitrary port and address ranges.
 
-This tool is free, but consider funding it here:
-1MASSCANaHUiyTtR3bJ2sLGuMw5kDBaj4T
+NOTE: masscan uses a its own **custom TCP/IP stack**. Anything other than
+simple port scans may cause conflict with the local TCP/IP stack. This means you 
+need to either the `--src-ip` option to run from a different IP address, or
+use `--src-port` to configure which source ports masscan uses, then also
+configure the internal firewall (like `pf` or `iptables`) to firewall those ports
+from the rest of the operating system.
+
+This tool is free, but consider contributing money to its developement:
+Bitcoin wallet address: 1MASSCANaHUiyTtR3bJ2sLGuMw5kDBaj4T
 
 
 # Building
@@ -38,13 +44,14 @@ by using the multi-threaded build:
 
 While Linux is the primary target platform, the code runs well on many other
 systems. Here's some additional build info:
-* Windows w/ Visual Studio: use the VS10 project
-* Windows w/ MingGW: just type `make`
-* Windows w/ cygwin: won't work
-* Mac OS X /w XCode: use the XCode4 project
-* Mac OS X /w cmdline: just type `make`
-* FreeBSD: type `gmake`
-* other: I don't know, don't care
+
+  * Windows w/ Visual Studio: use the VS10 project
+  * Windows w/ MingGW: just type `make`
+  * Windows w/ cygwin: won't work
+  * Mac OS X /w XCode: use the XCode4 project
+  * Mac OS X /w cmdline: just type `make`
+  * FreeBSD: type `gmake`
+  * other: try just compiling all the files together
 
 
 ## PF_RING
@@ -53,9 +60,9 @@ To get beyond 2 million packets/second, you need an Intel 10-gbps Ethernet
 adapter and a special driver known as ["PF_RING ZC" from ntop](http://www.ntop.org/products/packet-capture/pf_ring/pf_ring-zc-zero-copy/). Masscan doesn't need to be rebuilt in order to use PF_RING. To use PF_RING,
 you need to build the following components:
 
-* `libpfring.so` (installed in /usr/lib/libpfring.so)
-* `pf_ring.ko` (their kernel driver)
-* `ixgbe.ko` (their version of the Intel 10-gbps Ethernet driver)
+  * `libpfring.so` (installed in /usr/lib/libpfring.so)
+  * `pf_ring.ko` (their kernel driver)
+  * `ixgbe.ko` (their version of the Intel 10-gbps Ethernet driver)
 
 You don't need to build their version of `libpcap.so`.
 
@@ -63,7 +70,6 @@ When Masscan detects that an adapter is named something like `zc:enp1s0` instead
 of something like `enp1s0`, it'll automatically switch to PF_RING ZC mode.
 
 ## Regression testing
-
 The project contains a built-in self-test:
 
 	$ make regress
@@ -134,14 +140,46 @@ firewall the port that masscan uses. This prevents the local TCP/IP stack
 from seeing the packet, but masscan still sees it since it bypasses the
 local stack. For Linux, this would look like:
 
-	# iptables -A INPUT -p tcp --dport 60000 -j DROP
-	# masscan 10.0.0.0/8 -p80 --banners --source-port 60000
+	# iptables -A INPUT -p tcp --dport 61000 -j DROP
+	# masscan 10.0.0.0/8 -p80 --banners --source-port 61000
 
-On Mac OS X and BSD, it might look like this:
+You probably want to pick ports that don't conflict with ports Linux might otherwise
+choose for source-ports. You can see the range Linux uses, and reconfigure
+that range, by looking in the file:
 
-	# sudo ipfw add 1 deny tcp from any to any 60000 in
-	# masscan 10.0.0.0/8 -p80 --banners --source-port 60000
-	
+    /proc/sys/net/ipv4/ip_local_port_range
+
+On the latest version of Kali Linux (2018-August), that range is  32768  to  60999, so
+you should choose ports either below 32768 or 61000 and above.
+
+Setting an `iptables` rule only lasts until the next reboot. You need to lookup how to
+save the configuration depending upon your distro, such as using `iptables-save` 
+and/or `iptables-persistant`.
+
+On Mac OS X and BSD, there are similar steps. To find out the ranges to avoid,
+use a command like the following:
+
+    # sysctl net.inet.ip.portrange.first net.inet.ip.portrange.last
+
+On FreeBSD and older MacOS, use an `ipfw` command: 
+
+	# sudo ipfw add 1 deny tcp from any to any 40000 in
+	# masscan 10.0.0.0/8 -p80 --banners --source-port 40000
+
+On newer MacOS and OpenBSD, use the `pf` packet-filter utility. 
+Edit the file `/etc/pf.conf` to add a line like the following:
+
+    block in proto tcp from any to any port 40000
+    
+Then to enable the firewall, run the command:
+    
+    # pfctrl -E    
+
+If the firewall is already running, then either reboot or reload the rules
+with the following command:
+
+    # pfctl -f /etc/pf.conf
+
 Windows doesn't respond with RST packets, so neither of these techniques
 are necessary. However, masscan is still designed to work best using its
 own IP address, so you should run that way when possible, even when its

@@ -111,13 +111,41 @@
 #include <time.h>
 #include <assert.h>
 
+
 #ifndef NOBENCHMARK
 #include "pixie-timer.h"
 #if defined(_MSC_VER)
 #include <intrin.h>
-#elif defined(__llvm__)
+#elif defined(__FreeBSD__)
+#include <sys/types.h>
+#include <machine/cpufunc.h>
+#define __rdtsc rdtsc
+#if (__ARM_ARCH >= 6)  // V6 is the earliest arch that has a standard cyclecount
+unsigned long long rdtsc(void)
+{
+  uint32_t pmccntr;
+  uint32_t pmuseren;
+  uint32_t pmcntenset;
+  // Read the user mode perf monitor counter access permissions.
+  asm volatile("mrc p15, 0, %0, c9, c14, 0" : "=r"(pmuseren));
+  if (pmuseren & 1) {  // Allows reading perfmon counters for user mode code.
+    asm volatile("mrc p15, 0, %0, c9, c12, 1" : "=r"(pmcntenset));
+    if (pmcntenset & 0x80000000ul) {  // Is it counting?
+      asm volatile("mrc p15, 0, %0, c9, c13, 0" : "=r"(pmccntr));
+      // The counter is set up to count every 64th cycle
+      return (unsigned long long)(pmccntr) * 64ULL; 
+    }
+  }
+  return 0;
+}
+#endif
+#elif defined (__llvm__)
+#if defined(i386) || defined(__i386__)
 #include <x86intrin.h>
-#elif defined(__GNUC__)
+#else
+#define __rdtsc() 0
+#endif
+#elif defined(__GNUC__) || defined(__llvm__)
 static __inline__ unsigned long long __rdtsc(void)
 {
 #if defined(i386) || defined(__i386__)
@@ -212,6 +240,8 @@ struct SmackPattern
     unsigned                is_anchor_end:1;
 
     unsigned                is_snmp_hack:1;
+    
+    unsigned                is_wildcards:1;
 };
 
 
@@ -673,6 +703,7 @@ smack_add_pattern(
     pat->is_anchor_begin = ((flags & SMACK_ANCHOR_BEGIN) > 0);
     pat->is_anchor_end = ((flags & SMACK_ANCHOR_END) > 0);
     pat->is_snmp_hack = ((flags & SMACK_SNMP_HACK) > 0);
+    pat->is_wildcards = ((flags & SMACK_WILDCARDS) > 0);
     pat->id = id;
     pat->pattern = make_copy_of_pattern(pattern, pattern_length, smack->is_nocase);
     if (pat->is_anchor_begin)
@@ -916,7 +947,6 @@ smack_stage1_generate_fails(struct SMACK * smack)
 static void
 smack_stage2_link_fails(struct SMACK * smack)
 {
-    unsigned r;
     unsigned a;
     struct Queue *queue;
 
@@ -928,6 +958,8 @@ smack_stage2_link_fails(struct SMACK * smack)
     }
 
     while (queue_has_more_items(queue)) {
+        unsigned r;
+
         r = dequeue(queue);
 
         for (a=0; a<ALPHABET_SIZE; a++) {
@@ -1051,6 +1083,59 @@ smack_stage3_sort(struct SMACK *smack)
 }
 
 /****************************************************************************
+ *
+ * KLUDGE KLUDGE KLUDGE KLUDGE KLUDGE
+ *
+ * This function currently only works in a very narrow case, for the SMB
+ * parser, where all the patterns are "anchored" and none overlap with the
+ * the SMB patterns. This allows us to modify existing states with the
+ * the wildcards, without adding new states. Do do this right we need
+ * to duplicate states in order to track wildcards
+ ****************************************************************************/
+static void
+smack_fixup_wildcards(struct SMACK *smack)
+{
+    size_t i;
+    
+    for (i=0; i<smack->m_pattern_count; i++) {
+        size_t j;
+        struct SmackPattern *pat = smack->m_pattern_list[i];
+        
+        /* skip patterns that aren't wildcards */
+        if (!pat->is_wildcards)
+            continue;
+        
+        /* find the state leading up to the wilcard * character */
+        for (j=0; j<pat->pattern_length; j++) {
+            unsigned row = 0;
+            unsigned offset = 0;
+            size_t row_size = ((size_t)1 << smack->row_shift);
+            transition_t *table;
+            transition_t next_pattern;
+            transition_t base_state = (smack->is_anchor_begin?1:0);
+            size_t k;
+            
+            /* Skip non-wildcard characters */
+            if (pat->pattern[j] != '*')
+                continue;
+            
+            /* find the current 'row' */
+            while (offset < j)
+                smack_search_next(smack, &row, pat->pattern, &offset, (unsigned)j);
+            
+            row = row & 0xFFFFFF;
+            table = smack->table + (row << smack->row_shift);
+            next_pattern = table[smack->char_to_symbol['*']];
+            
+            for (k=0; k<row_size; k++) {
+                if (table[k] == base_state)
+                    table[k] = next_pattern;
+            }
+        }
+    }
+
+}
+/****************************************************************************
  ****************************************************************************/
 void
 smack_compile(struct SMACK *smack)
@@ -1106,12 +1191,18 @@ smack_compile(struct SMACK *smack)
         swap_rows(smack, BASE_STATE, UNANCHORED_STATE);
     }
 
+    /* prettify table for debugging */
     smack_stage3_sort(smack);
 
     /*
      * Build the final table we use for evaluation
      */
     smack_stage4_make_final_table(smack);
+    
+    /*
+     * Fixup the wildcard states
+     */
+    smack_fixup_wildcards(smack);
 
     /*
      * Get rid of the original pattern tables, since we no longer need them.
@@ -1529,7 +1620,7 @@ smack_selftest(void)
 {
     struct SMACK *s;
 
-    {
+    
         const char *patterns[] = {
             "GET",      "PUT",      "POST",     "OPTIONS",
             "HEAD",     "DELETE",   "TRACE",    "CONNECT",
@@ -1589,7 +1680,7 @@ smack_selftest(void)
         }*/
         smack_destroy(s);
 
-    }
+    
 
 
     return 0;

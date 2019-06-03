@@ -1,18 +1,32 @@
 #ifndef PROTO_BANNER1_H
 #define PROTO_BANNER1_H
 #include <stdint.h>
-#define STATE_DONE 0xFFFFFFFF
+
 #include <stdio.h>
+#include "masscan-app.h"
 #include "proto-banout.h"
 #include "proto-x509.h"
+#include "proto-spnego.h"
 
 struct InteractiveData;
+struct Banner1;
+struct ProtocolState;
 
+typedef void (*BannerParser)(
+              const struct Banner1 *banner1,
+              void *banner1_private,
+              struct ProtocolState *stream_state,
+              const unsigned char *px, size_t length,
+              struct BannerOutput *banout,
+              struct InteractiveData *more);
 struct Banner1
 {
+    struct lua_State *L;
     struct SMACK *smack;
     struct SMACK *http_fields;
     struct SMACK *html_fields;
+    struct SMACK *memcached_responses;
+    struct SMACK *memcached_stats;
 
     unsigned is_capture_html:1;
     unsigned is_capture_cert:1;
@@ -22,7 +36,11 @@ struct Banner1
     unsigned is_ticketbleed:1;
     unsigned is_poodle_sslv3:1;
 
-    struct ProtocolParserStream *tcp_payloads[65536];
+    struct {
+        struct ProtocolParserStream *tcp[65536];
+    } payloads;
+    
+    BannerParser parser[PROTO_end_of_list];
 };
 
 struct BannerBase64
@@ -117,13 +135,105 @@ struct POP3STUFF {
     unsigned is_last:1;
 };
 
+struct MEMCACHEDSTUFF {
+    unsigned match;
+};
+
+struct Smb72_Negotiate {
+    uint16_t DialectIndex;
+    uint16_t SecurityMode;
+    uint64_t SystemTime;
+    uint32_t SessionKey;
+    uint32_t Capabilities;
+    uint16_t ServerTimeZone;
+    uint8_t  ChallengeLength;
+    uint8_t  ChallengeOffset;
+};
+
+struct Smb73_Setup {
+    uint16_t BlobLength;
+    uint16_t BlobOffset;
+};
+
+struct SMBSTUFF {
+    unsigned nbt_state;
+    unsigned char nbt_type;
+    unsigned char nbt_flags;
+    unsigned is_printed_ver:1;
+    unsigned is_printed_guid:1;
+    unsigned is_printed_time:1;
+    unsigned nbt_length;
+    unsigned nbt_err;
+    
+    union {
+        struct {
+            unsigned char   command;
+            unsigned        status;
+            unsigned char   flags1;
+            unsigned short  flags2;
+            unsigned        pid;
+            unsigned char   signature[8];
+            unsigned short  tid;
+            unsigned short  uid;
+            unsigned short  mid;
+            unsigned short  param_length;
+            unsigned short  param_offset;
+            unsigned short  byte_count;
+            unsigned short  byte_offset;
+            unsigned short  byte_state;
+            unsigned short  unicode_char;
+        } smb1;
+        struct {
+            unsigned seqno;
+            unsigned short header_length;
+            unsigned short offset;
+            unsigned short state;
+            unsigned short opcode;
+            unsigned short struct_length;
+            unsigned is_dynamic:1;
+            unsigned char flags;
+            unsigned ntstatus;
+            unsigned number;
+            unsigned short blob_offset;
+            unsigned short blob_length;
+        } smb2;
+    } hdr;
+    union {
+        struct Smb72_Negotiate negotiate;
+        struct Smb73_Setup setup;
+        struct {
+            uint64_t current_time;
+            uint64_t boot_time;
+        } negotiate2;
+    } parms;
+    struct SpnegoDecode spnego;
+};
+
+struct RDPSTUFF {
+    unsigned short tpkt_length;
+    struct {
+        unsigned state;
+        unsigned short dstref;
+        unsigned short srcref;
+        unsigned char len;
+        unsigned char type;
+        unsigned char flags;
+    } cotp;
+    struct {
+        unsigned state;
+        unsigned result;
+        unsigned char type;
+        unsigned char flags;
+        unsigned char len;
+    } cc;
+};
+
 struct ProtocolState {
     unsigned state;
     unsigned remaining;
     unsigned short port;
     unsigned short app_proto;
     unsigned is_sent_sslhello:1;
-    unsigned is_done:1;
     struct BannerBase64 base64;
 
     union {
@@ -132,6 +242,9 @@ struct ProtocolState {
         struct FTPSTUFF ftp;
         struct SMTPSTUFF smtp;
         struct POP3STUFF pop3;
+        struct MEMCACHEDSTUFF memcached;
+        struct SMBSTUFF smb;
+        struct RDPSTUFF rdp;
     } sub;
 };
 
@@ -158,19 +271,52 @@ struct ProtocolParserStream {
         const unsigned char *px, size_t length,
         struct BannerOutput *banout,
         struct InteractiveData *more);
+    void (*cleanup)(struct ProtocolState *stream_state);
+    void (*transmit_hello)(const struct Banner1 *banner1, struct InteractiveData *more);
+    
+    /* When multiple items are registered for a port. When one
+     * connection is closed, the next will be opened.*/
+    struct ProtocolParserStream *next;
+    
+    /*NOTE: the 'next' parameter should be the last one in this structure,
+     * because we statically initialize the rest of the members at compile
+     * time, and then use this last parameter to link up structures
+     * at runtime */
 };
 
 
+/**
+ * Patterns that match the data from the start of a TCP connection.
+ * This will hint at what protocol that connection might be.
+ */
 struct Patterns {
+    
+    /** A string like "SSH-" or "220 " that matches a banner */
     const char *pattern;
+    
+    /** The length of that string, since it may be binary containing
+     * nul characters */
     unsigned pattern_length;
+    
+    /** An integer arbitrarily assigned to this pattern, which should
+     * probably match the protocol ID that we are looking for */
     unsigned id;
+    
+    /**
+     * Whether this string matches only at the begining ('anchored')
+     * or anywhere in the input. Virtually all the patterns are anchored.
+     */
     unsigned is_anchored;
+    
+    /**
+     * Some extra flags for the pattern matcher for a few os the patterns.
+     */
     unsigned extra;
 };
 
 struct Banner1 *
 banner1_create(void);
+
 
 void
 banner1_destroy(struct Banner1 *b);
