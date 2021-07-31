@@ -273,7 +273,7 @@ infinite:
     end = range;
     if (masscan->resume.count && end > start + masscan->resume.count)
         end = start + masscan->resume.count;
-    end += retries * rate;
+    end += retries * range;
 
 
     /* -----------------
@@ -606,6 +606,7 @@ receive_thread(void *v)
      */
     if (masscan->is_banners) {
         struct TcpCfgPayloads *pay;
+        size_t i;
 
         /*
          * Create TCP connection table
@@ -635,41 +636,51 @@ receive_thread(void *v)
                 masscan->is_capture_html,
                 masscan->is_capture_heartbleed,
 				masscan->is_capture_ticketbleed);
-        if (masscan->http_user_agent_length)
+        if (masscan->is_hello_smbv1)
+            tcpcon_set_parameter(tcpcon, "hello", 1, "smbv1");
+        if (masscan->is_hello_http)
+            tcpcon_set_parameter(tcpcon, "hello", 1, "http");
+        if (masscan->is_hello_ssl)
+            tcpcon_set_parameter(tcpcon, "hello", 1, "ssl");
+        if (masscan->is_heartbleed)
+            tcpcon_set_parameter(tcpcon, "heartbleed", 1, "1");
+        if (masscan->is_ticketbleed)
+            tcpcon_set_parameter(tcpcon, "ticketbleed", 1, "1");
+        if (masscan->is_poodle_sslv3)
+            tcpcon_set_parameter(tcpcon, "sslv3", 1, "1");
+
+        if (masscan->http.payload)
+            tcpcon_set_parameter(   tcpcon,
+                                    "http-payload",
+                                    masscan->http.payload_length,
+                                    masscan->http.payload);
+        if (masscan->http.user_agent)
             tcpcon_set_parameter(   tcpcon,
                                     "http-user-agent",
-                                    masscan->http_user_agent_length,
-                                    masscan->http_user_agent);
-        if (masscan->is_hello_smbv1)
+                                    masscan->http.user_agent_length,
+                                    masscan->http.user_agent);
+        if (masscan->http.host)
             tcpcon_set_parameter(   tcpcon,
-                                 "hello",
-                                 1,
-                                 "smbv1");
-        if (masscan->is_hello_http)
+                                    "http-host",
+                                    masscan->http.host_length,
+                                    masscan->http.host);
+        if (masscan->http.method)
             tcpcon_set_parameter(   tcpcon,
-                                 "hello",
-                                 1,
-                                 "http");
-        if (masscan->is_hello_ssl)
+                                    "http-method",
+                                    masscan->http.method_length,
+                                    masscan->http.method);
+        if (masscan->http.url)
             tcpcon_set_parameter(   tcpcon,
-                                 "hello",
-                                 1,
-                                 "ssl");
-        if (masscan->is_heartbleed)
+                                    "http-url",
+                                    masscan->http.url_length,
+                                    masscan->http.url);
+        if (masscan->http.version)
             tcpcon_set_parameter(   tcpcon,
-                                 "heartbleed",
-                                 1,
-                                 "1");
-        if (masscan->is_ticketbleed)
-            tcpcon_set_parameter(   tcpcon,
-                                 "ticketbleed",
-                                 1,
-                                 "1");
-        if (masscan->is_poodle_sslv3)
-            tcpcon_set_parameter(   tcpcon,
-                                 "sslv3",
-                                 1,
-                                 "1");
+                                    "http-version",
+                                    masscan->http.version_length,
+                                    masscan->http.version);
+
+
         if (masscan->tcp_connection_timeout) {
             char foo[64];
             sprintf_s(foo, sizeof(foo), "%u", masscan->tcp_connection_timeout);
@@ -680,13 +691,35 @@ receive_thread(void *v)
         }
         if (masscan->tcp_hello_timeout) {
             char foo[64];
-            sprintf_s(foo, sizeof(foo), "%u", masscan->tcp_connection_timeout);
+            sprintf_s(foo, sizeof(foo), "%u", masscan->tcp_hello_timeout);
             tcpcon_set_parameter(   tcpcon,
                                  "hello-timeout",
                                  strlen(foo),
                                  foo);
         }
         
+        for (i=0; i<masscan->http.headers_count; i++) {
+            tcpcon_set_http_header(tcpcon,
+                        masscan->http.headers[i].name,
+                        masscan->http.headers[i].value_length,
+                        masscan->http.headers[i].value,
+                        http_field_replace);
+        }
+        for (i=0; i<masscan->http.cookies_count; i++) {
+            tcpcon_set_http_header(tcpcon,
+                        "Cookie",
+                        masscan->http.cookies[i].value_length,
+                        masscan->http.cookies[i].value,
+                        http_field_add);
+        }
+        for (i=0; i<masscan->http.remove_count; i++) {
+            tcpcon_set_http_header(tcpcon,
+                        masscan->http.headers[i].name,
+                        0,
+                        0,
+                        http_field_remove);
+        }
+
         for (pay = masscan->payloads.tcp; pay; pay = pay->next) {
             char name[64];
             sprintf_s(name, sizeof(name), "hello-string[%u]", pay->port);
@@ -1178,7 +1211,8 @@ main_scan(struct Masscan *masscan)
         LOG(0, " [hint] try something like \"--ports 0-65535\"\n");
         return 1;
     }
-    range = count_ips * count_ports + (uint64_t)(masscan->retries * masscan->max_rate);
+    range = count_ips * count_ports;
+    range += (uint64_t)(masscan->retries * range);
 
     /*
      * If doing an ARP scan, then don't allow port scanning
@@ -1450,6 +1484,11 @@ main_scan(struct Masscan *masscan)
 
         if (time(0) - now >= masscan->wait) {
             is_rx_done = 1;
+        }
+
+        if (time(0) - now - 10 > masscan->wait) {
+            LOG(0, "[-] Passed the wait window but still running, forcing exit...\n");
+            exit(0);
         }
 
         if (masscan->output.is_status_updates) {
